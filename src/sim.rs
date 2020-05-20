@@ -1,36 +1,39 @@
-use core;
+use volatile::Volatile;
+use bit_field::BitField;
 
 #[derive(Clone,Copy)]
 pub enum Clock {
     PortC,
+    PortB,
+    Uart0
 }
 
 #[repr(C,packed)]
 pub struct Sim {
-    sopt1: u32,
-    sopt1_cfg: u32,
+    sopt1: Volatile<u32>,
+    sopt1_cfg: Volatile<u32>,
     _pad0: [u32; 1023],
-    sopt2: u32,
-    _pad1: u32,
-    sopt4: u32,
-    sopt5: u32,
-    _pad2: u32,
-    sopt7: u32,
+    sopt2: Volatile<u32>,
+    _pad1: Volatile<u32>,
+    sopt4: Volatile<u32>,
+    sopt5: Volatile<u32>,
+    _pad2: Volatile<u32>,
+    sopt7: Volatile<u32>,
     _pad3: [u32; 2],
-    sdid: u32,
+    sdid: Volatile<u32>,
     _pad4: [u32; 3],
-    scgc4: u32,
-    scgc5: u32,
-    scgc6: u32,
-    scgc7: u32,
-    clkdiv1: u32,
-    clkviv2: u32,
-    fcfg1: u32,
-    fcfg2: u32,
-    uidh: u32,
-    uidmh: u32,
-    uidml: u32,
-    uidl: u32
+    scgc4: Volatile<u32>,
+    scgc5: Volatile<u32>,
+    scgc6: Volatile<u32>,
+    scgc7: Volatile<u32>,
+    clkdiv1: Volatile<u32>,
+    clkviv2: Volatile<u32>,
+    fcfg1: Volatile<u32>,
+    fcfg2: Volatile<u32>,
+    uidh: Volatile<u32>,
+    uidmh: Volatile<u32>,
+    uidml: Volatile<u32>,
+    uidl: Volatile<u32>
 }
 
 impl Sim {
@@ -39,14 +42,32 @@ impl Sim {
     }
 
     pub fn enable_clock(&mut self, clock: Clock) {
-        unsafe {
-            match clock {
-                Clock::PortC => {
-                    let mut scgc = core::ptr::read_volatile(&self.scgc5);
-                    scgc |= 0x00000800;
-                    core::ptr::write_volatile(&mut self.scgc5, scgc);
-                }
+        match clock {
+            Clock::PortC => unsafe {
+                self.scgc5.update(|scgc| {
+                    scgc.set_bit(11, true);
+                });
             }
+            Clock::PortB => unsafe {
+                self.scgc5.update(|scgc| {
+                    scgc.set_bit(10, true);
+                });
+            }
+            Clock::Uart0 => unsafe {
+                self.scgc4.update(|scgc| {
+                    scgc.set_bit(10, true);
+                });
+            }
+        }
+    }
+
+    pub fn set_dividers(&mut self, core: u32, bus: u32, flash: u32) {
+        let mut clkdiv: u32 = 0;
+        clkdiv.set_bits(28..32, core-1);
+        clkdiv.set_bits(24..28, bus-1);
+        clkdiv.set_bits(16..20, flash-1);
+        unsafe {
+            self.clkdiv1.write(clkdiv);
         }
     }
 }
