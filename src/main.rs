@@ -1,9 +1,14 @@
-#![feature(stdsimd)]
+#![feature(panic_info_message,stdsimd)]
 #![no_std]
 #![no_main]
+#![no_builtins]
 
-use core::arch::arm::__nop;
+extern crate volatile;
+extern crate bit_field;
+
+use volatile::Volatile;
 use core::fmt::Write;
+use core::slice;
 
 mod port;
 mod sim;
@@ -12,33 +17,42 @@ mod mcg;
 mod osc;
 mod uart;
 
+use port::*;
+use sim::*;
+use watchdog::*;
+use mcg::*;
+use osc::*;
+use uart::*;
+
 #[no_mangle]
 pub extern fn main() {
-    let (wdog,sim,mcg,osc,pin) = unsafe {
-        (watchdog::Watchdog::new(),
-         sim::Sim::new(),
-         mcg::Mcg::new(),
-         osc::Osc::new(),
-         port::Port::new(port::PortName::C).pin(5))
-    };
+    unsafe {
+        Watchdog::new().disable();
+        setup_bss();
+    }
 
-    wdog.disable();
     // Enable the crystal oscillator with 10pf of capacitance
-    osc.enable(10);
-    // Turn on the Port C clock gate
-    sim.enable_clock(sim::Clock::PortC);
+    let osc_token = Osc::new().enable(10);
+
     // Set our clocks:
     // core: 72Mhz
     // peripheral: 36MHz
     // flash: 24MHz
+    let mut sim = Sim::new();
     sim.set_dividers(1, 2, 3);
     // We would also set the USB divider here if we wanted to use it.
 
+    let portc = sim.port(PortName::C);
+    let mut gpio = portc.pin(5).make_gpio();
+    gpio.output();
+    gpio.high();
+
     // Now we can start setting up the MCG for our needs.
-    if let mcg::Clock::Fei(mut fei) = mcg.clock() {
+    let mcg = Mcg::new();
+    if let Clock::Fei(mut fei) = mcg.clock() {
         // Our 16MHz xtal is "very fast", and needs to be divided
         // by 512 to be in the acceptable FLL range.
-        fei.enable_xtal(mcg::OscRange::VeryHigh);
+        fei.enable_xtal(OscRange::VeryHigh, osc_token);
         let fbe = fei.use_external(512);
 
         // PLL is 27/6 * xtal == 72MHz
@@ -48,45 +62,42 @@ pub extern fn main() {
         panic!("Somehow the clock wasn't in FEI mode");
     }
 
-    let mut gpio = pin.make_gpio();
-
-    gpio.output();
-    gpio.high();
-
-    sim.enable_clock(sim::Clock::PortB);
-    sim.enable_clock(sim::Clock::Uart0);
-
-    let uart = unsafe {
-        let rx = port::Port::new(port::PortName::B).pin(16).make_rx();
-        let tx = port::Port::new(port::PortName::B).pin(17).make_tx();
-        uart::Uart::new(0, Some(rx), Some(tx), (468, 24))
+    // Initialize the UART as our panic writer. This is unsafe because
+    // we are modifying a global variable.
+    unsafe {
+        PORT = Some(sim.port(PortName::B));
+        let rx = PORT.as_ref().unwrap().pin(16).make_rx();
+        let tx = PORT.as_ref().unwrap().pin(17).make_tx();
+        WRITER = Some(sim.uart(0, Some(rx), Some(tx), (468, 24)));
     };
 
-    writeln!(uart, "Hello, World").unwrap();
-
-    loop {
-        gpio.low();
-        for _ in 0..100_000 {
-            unsafe {
-                __nop();
-            }
-        }
-        gpio.high();
-        for _ in 0..100_000 {
-            unsafe {
-                __nop();
-            }
-        }
-    }
+    loop {}
 }
 
+static mut PORT: Option<Port> = None;
+static mut WRITER: Option<Uart<'static, 'static>> = None;
+
 #[panic_handler]
-fn teensy_panic(_pi: &core::panic::PanicInfo) -> ! {
-    loop {};
+fn teensy_panic(pi: &core::panic::PanicInfo) -> ! {
+    if let Some(uart) = unsafe { WRITER.as_mut() } {
+        write!(uart, "Panic occured! ");
+        if let Some(format_args) = pi.message() {
+            core::fmt::write(uart, *format_args).unwrap();
+        }
+    }
+
+    // Reset the MCU after we've printed our panic.
+    let aircr = unsafe {
+        &mut *(0xE000ED0C as *mut Volatile<u32>)
+    };
+    aircr.write(0x05FA0004);
+    unreachable!();
 }
 
 extern {
     fn _stack_top();
+    static mut _bss_start: u8;
+    static mut _bss_end: u8;
 }
 
 #[link_section = ".vectors"]
@@ -102,3 +113,13 @@ pub static _FLASHCONFIG: [u8; 16] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xDE, 0xF9, 0xFF, 0xFF
 ];
+
+unsafe fn setup_bss() {
+    let bss_start = &mut _bss_start as *mut u8;
+    let bss_end = &mut _bss_end as *mut u8;
+    let bss_len = bss_end as usize - bss_start as usize;
+    let bss = slice::from_raw_parts_mut(bss_start, bss_len);
+    for b in &mut bss.iter_mut() {
+        *b = 0;
+    }
+}

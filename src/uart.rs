@@ -1,3 +1,4 @@
+use crate::sim::ClockGate;
 use volatile::Volatile;
 use bit_field::BitField;
 
@@ -6,7 +7,7 @@ use core;
 use super::port::{Rx,Tx};
 
 #[repr(C,packed)]
-pub struct Uart {
+struct UartRegs {
     bdh: Volatile<u8>,
     bdl: Volatile<u8>,
     c1: Volatile<u8>,
@@ -24,8 +25,15 @@ pub struct Uart {
     ir: Volatile<u8>,
 }
 
-impl Uart {
-    pub unsafe fn new(id: u8, rx: Option<Rx>, tx: Option<Tx>, clkdiv: (u16,u8)) -> &'static mut Uart {
+pub struct Uart<'a, 'b> {
+    reg: &'static mut UartRegs,
+    _rx: Option<Rx<'a>>,
+    _tx: Option<Tx<'b>>,
+    _gate: ClockGate
+}
+
+impl<'a, 'b> Uart<'a, 'b> {
+    pub unsafe fn new(id: u8, rx: Option<Rx<'a>>, tx: Option<Tx<'b>>, clkdiv: (u16,u8), gate: ClockGate) -> Uart<'a, 'b> {
         if let Some(r) = rx.as_ref() {
             if r.uart() != id {
                 panic!("Invalid RX pin for UART {}", id);
@@ -43,35 +51,35 @@ impl Uart {
             panic!("Invalid UART fractional divisor: {}", clkdiv.1);
         }
 
-        let uart = match id {
-            0 => &mut *(0x4006A000 as *mut Uart),
+        let reg = match id {
+            0 => &mut *(0x4006A000 as *mut UartRegs),
             _ => panic!("Invalid UART id: {}", id)
         };
 
-        uart.c4.update(|c4| {
+        reg.c4.update(|c4| {
             c4.set_bits(0..5, clkdiv.1);
         });
-        uart.bdh.update(|bdh| {
+        reg.bdh.update(|bdh| {
             bdh.set_bits(0..5, clkdiv.0.get_bits(8..13) as u8);
         });
-        uart.bdl.write(clkdiv.0.get_bits(0..8) as u8);
+        reg.bdl.write(clkdiv.0.get_bits(0..8) as u8);
 
-        uart.c2.update(|c2| {
+        reg.c2.update(|c2| {
             c2.set_bit(2, rx.is_some());
             c2.set_bit(3, tx.is_some());
         });
 
-        uart
+        Uart {reg, _tx: tx, _rx: rx, _gate: gate}
     }
 }
 
-impl core::fmt::Write for Uart {
+impl core::fmt::Write for Uart<'_, '_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for b in s.bytes() {
-            while !self.s1.read().get_bit(7) {}
-            self.d.write(b);
+            while !self.reg.s1.read().get_bit(7) {}
+            self.reg.d.write(b);
         }
-        while !self.s1.read().get_bit(6) {}
+        while !self.reg.s1.read().get_bit(6) {}
         Ok(())
     }
 }

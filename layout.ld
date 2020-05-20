@@ -18,6 +18,13 @@ SECTIONS
     .rodata : {
         *(.rodata*)
     } > FLASH
+    
+    .bss : {
+         . = ORIGIN(RAM);
+         _bss_start = .;
+         *(.bss*)
+         _bss_end = .;
+    } > RAM
 
     _stack_top = ORIGIN(RAM) + LENGTH(RAM);
 

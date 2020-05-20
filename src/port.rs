@@ -1,3 +1,6 @@
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
+use crate::sim::ClockGate;
 use volatile::Volatile;
 use bit_field::BitField;
 
@@ -8,7 +11,7 @@ pub enum PortName {
 }
 
 #[repr(C,packed)]
-pub struct Port {
+struct PortRegs {
     pcr: [Volatile<u32>; 32],
     gpclr: Volatile<u32>,
     gpchr: Volatile<u32>,
@@ -16,14 +19,20 @@ pub struct Port {
     isfr: Volatile<u32>,
 }
 
-pub struct Pin {
-    port: *mut Port,
+pub struct Port {
+    reg: UnsafeCell<&'static mut PortRegs>,
+    locks: [AtomicBool; 32],
+    _gate: ClockGate,
+}
+
+pub struct Pin<'a> {
+    port: &'a Port,
     pin: usize
 }
 
-pub struct Gpio {
+pub struct Gpio<'a> {
     gpio: *mut GpioBitband,
-    pin: usize
+    pin: Pin<'a>
 }
 
 #[repr(C,packed)]
@@ -36,25 +45,44 @@ struct GpioBitband {
     pddr: [Volatile<u32>; 32]
 }
 
-pub struct Tx(u8);
-pub struct Rx(u8);
+pub struct Tx<'a> {
+    uart: u8,
+    _pin: Pin<'a>
+}
+pub struct Rx<'a> {
+    uart: u8,
+    _pin: Pin<'a>
+}
 
 impl Port {
-    pub unsafe fn new(name: PortName) -> &'static mut Port {
-        &mut * match name {
-            PortName::C => 0x4004B000 as *mut Port,
-            PortName::B => 0x4004A000 as *mut Port
-        }
+    pub unsafe fn new(name: PortName, gate: ClockGate) -> Port {
+        let myself = &mut * match name {
+            PortName::C => 0x4004B000 as *mut PortRegs,
+            PortName::B => 0x4004A000 as *mut PortRegs
+        };
+
+        Port { reg: UnsafeCell::new(myself), locks: Default::default(), _gate: gate}
     }
 
-    pub unsafe fn set_pin_mode(&mut self, p: usize, mode: u32) {
-        self.pcr[p].update(|pcr| {
+    pub unsafe fn set_pin_mode(&self, p: usize, mode: u32) {
+        assert!(p < 32);
+        self.reg().pcr[p].update(|pcr| {
             pcr.set_bits(8..11, mode);
         });
     }
 
-    pub unsafe fn pin(&mut self, p: usize) -> Pin {
+    pub fn pin(&self, p: usize) -> Pin {
+        assert!(p < 32);
+        let was_init = self.locks[p].swap(true, Ordering::Relaxed);
+        if was_init {
+            panic!("Pin {} is already in use", p);
+        }
         Pin { port: self, pin: p }
+    }
+
+    unsafe fn drop_pin(&self, p: usize) {
+        assert!(p < 32);
+        self.locks[p].store(false, Ordering::Relaxed);
     }
 
     pub fn name(&self) -> PortName {
@@ -65,37 +93,45 @@ impl Port {
             _ => unreachable!()
         }
     }
+
+    fn reg(&self) -> &'static mut PortRegs {
+        // NOTE: This does no validation. It's on the calling
+        // functions to ensure they're not accessing the same
+        // registers from multiple codepaths. If they can't make those
+        // guarantees, they should be marked as `unsafe` (See
+        // `set_pin_mode` as an example).
+        unsafe {
+            *self.reg.get()
+        }
+    }
 }
 
-impl Pin {
-    pub fn make_gpio(self) -> Gpio {
+impl<'a> Pin<'a> {
+    pub fn make_gpio(self) -> Gpio<'a> {
         unsafe {
-            let port = &mut *self.port;
-            port.set_pin_mode(self.pin, 1);
-            Gpio::new(port.name(), self.pin)
+            self.port.set_pin_mode(self.pin, 1);
+            Gpio::new(self.port.name(), self)
         }
     }
 
-    pub fn make_rx(self) -> Rx {
+    pub fn make_rx(self) -> Rx<'a> {
         unsafe {
-            let port = &mut *self.port;
-            match (port.name(), self.pin) {
+            match (self.port.name(), self.pin) {
                 (PortName::B, 16) => {
-                    port.set_pin_mode(self.pin, 3);
-                    Rx(0)
+                    self.port.set_pin_mode(self.pin, 3);
+                    Rx{uart: 0, _pin: self}
                 },
                 _ => panic!("Invalid serial RX pin")
             }
         }
     }
 
-    pub fn make_tx(self) -> Tx {
+    pub fn make_tx(self) -> Tx<'a> {
         unsafe {
-            let port = &mut *self.port;
-            match (port.name(), self.pin) {
+            match (self.port.name(), self.pin) {
                 (PortName::B, 17) => {
-                    port.set_pin_mode(self.pin, 3);
-                    Tx(0)
+                    self.port.set_pin_mode(self.pin, 3);
+                    Tx{uart: 0, _pin: self}
                 },
                 _ => panic!("Invalid serial TX pin")
             }
@@ -103,8 +139,16 @@ impl Pin {
     }
 }
 
-impl Gpio {
-    pub unsafe fn new(port: PortName, pin: usize) -> Gpio {
+impl <'a> Drop for Pin<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.port.drop_pin(self.pin);
+        }
+    }
+}
+
+impl<'a> Gpio<'a> {
+    pub unsafe fn new(port: PortName, pin: Pin) -> Gpio {
         let gpio = match port {
             PortName::C => 0x43FE1000 as *mut GpioBitband,
             PortName::B => 0x43FE0800 as *mut GpioBitband
@@ -115,31 +159,31 @@ impl Gpio {
 
     pub fn output(&mut self) {
         unsafe {
-            (*self.gpio).pddr[self.pin].write(1);
+            (*self.gpio).pddr[self.pin.pin].write(1);
         }
     }
 
     pub fn high(&mut self) {
         unsafe {
-            (*self.gpio).psor[self.pin].write(1);
+            (*self.gpio).psor[self.pin.pin].write(1);
         }
     }
 
     pub fn low(&mut self) {
         unsafe {
-            (*self.gpio).pcor[self.pin].write(1);
+            (*self.gpio).pcor[self.pin.pin].write(1);
         }
     }
 }
 
-impl Rx {
+impl Rx<'_> {
     pub fn uart(&self) -> u8 {
-        self.0
+        self.uart
     }
 }
 
-impl Tx {
+impl Tx<'_> {
     pub fn uart(&self) -> u8 {
-        self.0
+        self.uart
     }
 }
