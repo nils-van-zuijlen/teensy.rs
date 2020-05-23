@@ -19,7 +19,7 @@ static OSC_INIT: AtomicBool = AtomicBool::new(false);
 
 impl Osc {
     pub fn new() -> Osc {
-        let was_init = OSC_INIT.swap(true, Ordering::Relaxed);
+        let was_init = OSC_INIT.swap(true, Ordering::SeqCst);
         if was_init {
             panic!("Cannot initialize OSC: It's already active");
         }
@@ -51,7 +51,7 @@ impl Osc {
 
 impl Drop for Osc {
     fn drop(&mut self) {
-        OSC_INIT.store(false, Ordering::Relaxed);
+        OSC_INIT.store(false, Ordering::SeqCst);
     }
 }
 

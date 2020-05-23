@@ -62,7 +62,7 @@ static MCG_INIT: AtomicBool = AtomicBool::new(false);
 
 impl Mcg {
     pub fn new() -> Mcg {
-        let was_init = MCG_INIT.swap(true, Ordering::Relaxed);
+        let was_init = MCG_INIT.swap(true, Ordering::SeqCst);
         if was_init {
             panic!("Cannot initialize MCG: It's already active");
         }
@@ -88,7 +88,7 @@ impl Mcg {
 
 impl Drop for Mcg {
     fn drop(&mut self) {
-        MCG_INIT.store(false, Ordering::Relaxed);
+        MCG_INIT.store(false, Ordering::SeqCst);
     }
 }
 

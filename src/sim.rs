@@ -68,7 +68,7 @@ static SIM_INIT: AtomicBool = AtomicBool::new(false);
 
 impl Sim {
     pub fn new() -> Sim {
-        let was_init = SIM_INIT.swap(true, Ordering::Relaxed);
+        let was_init = SIM_INIT.swap(true, Ordering::SeqCst);
         if was_init {
             panic!("Cannot initialize SIM: It's already active");
         }
@@ -117,6 +117,6 @@ impl Sim {
 
 impl Drop for Sim {
     fn drop(&mut self) {
-        SIM_INIT.store(false, Ordering::Relaxed);
+        SIM_INIT.store(false, Ordering::SeqCst);
     }
 }

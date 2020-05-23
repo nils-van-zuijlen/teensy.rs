@@ -73,7 +73,7 @@ impl Port {
 
     pub fn pin(&self, p: usize) -> Pin {
         assert!(p < 32);
-        let was_init = self.locks[p].swap(true, Ordering::Relaxed);
+        let was_init = self.locks[p].swap(true, Ordering::SeqCst);
         if was_init {
             panic!("Pin {} is already in use", p);
         }
@@ -82,7 +82,7 @@ impl Port {
 
     unsafe fn drop_pin(&self, p: usize) {
         assert!(p < 32);
-        self.locks[p].store(false, Ordering::Relaxed);
+        self.locks[p].store(false, Ordering::SeqCst);
     }
 
     pub fn name(&self) -> PortName {
